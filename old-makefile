@@ -180,6 +180,8 @@ SOURCES = audio/audio.c \
           misc/bstr.c \
           misc/charset_conv.c \
           misc/dispatch.c \
+          misc/json.c \
+          misc/json_test.c \
           misc/rendezvous.c \
           misc/ring.c \
           options/m_config.c \

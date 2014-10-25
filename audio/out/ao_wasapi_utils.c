@@ -60,6 +60,8 @@ union WAVEFMT {
     WAVEFORMATEXTENSIBLE *extensible;
 };
 
+static HRESULT wasapi_reset_device(struct ao *ao);
+
 int wasapi_fill_VistaBlob(wasapi_state *state)
 {
     if (!state)
@@ -85,6 +87,9 @@ const char *wasapi_explain_err(const HRESULT hr)
 #define E(x) case x : return # x ;
     switch (hr) {
     E(S_OK)
+    E(E_OUTOFMEMORY)
+    E(E_POINTER)
+    E(E_INVALIDARG)
     E(AUDCLNT_E_NOT_INITIALIZED)
     E(AUDCLNT_E_ALREADY_INITIALIZED)
     E(AUDCLNT_E_WRONG_ENDPOINT_TYPE)
@@ -451,9 +456,10 @@ exit_label:
     return 1;
 }
 
-static int fix_format(struct wasapi_state *state)
+static int fix_format(struct ao *const ao, int simple)
 {
     HRESULT hr;
+    struct wasapi_state *state = (struct wasapi_state *)ao->priv;
     double offset = 0.5;
 
     /* cargo cult code to negotiate buffer block size, affected by hardware/drivers combinations,
@@ -462,7 +468,9 @@ static int fix_format(struct wasapi_state *state)
     hr = IAudioClient_GetDevicePeriod(state->pAudioClient,
                                       &state->defaultRequestedDuration,
                                       &state->minRequestedDuration);
+    MP_VERBOSE(state, "IAudioClient::Initialize GetDevicePeriod: %s\n", wasapi_explain_err(hr));
 reinit:
+    MP_VERBOSE(state, "IAudioClient::Initialize reinit\n");
     hr = IAudioClient_Initialize(state->pAudioClient,
                                  state->share_mode,
                                  AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
@@ -471,8 +479,9 @@ reinit:
                                  &(state->format.Format),
                                  NULL);
     /* something about buffer sizes on Win7, fixme might loop forever */
-    if (hr == AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED) {
-        MP_VERBOSE(state, "IAudioClient::Initialize negotiation failed with %s, used %lld * 100ns\n",
+    switch (hr) {
+      case  AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED:
+        MP_VERBOSE(state, "IAudioClient::Initialize negotiation failed with %s, used %"PRId64" * 100ns\n",
                    wasapi_explain_err(hr), state->defaultRequestedDuration);
         if (offset > 10.0)
             goto exit_label;                /* is 10 enough to break out of the loop?*/
@@ -481,18 +490,28 @@ reinit:
             (REFERENCE_TIME)((10000.0 * 1000 / state->format.Format.nSamplesPerSec *
                               state->bufferFrameCount) + offset);
         offset += 0.5;
+      case AUDCLNT_E_DEVICE_IN_USE:
+        MP_VERBOSE(state, "IAudioClient::Initialize AUDCLNT_E_DEVICE_IN_USE, retrying\n");
+        wasapi_reset_device(ao);
         IAudioClient_Release(state->pAudioClient);
         state->pAudioClient = NULL;
         hr = IMMDeviceActivator_Activate(state->pDevice,
                                          &IID_IAudioClient, CLSCTX_ALL,
                                          NULL, (void **)&state->pAudioClient);
+        hr = IMMDeviceActivator_Activate(state->pDevice, &IID_IAudioEndpointVolume,
+                                         CLSCTX_ALL, NULL,
+                                         (void **)&state->pEndpointVolume);
         goto reinit;
+      default:
+        EXIT_ON_ERROR(hr);
     }
-    EXIT_ON_ERROR(hr);
+
+    MP_VERBOSE(state, "IAudioClient::Initialize pRenderClient\n");
     hr = IAudioClient_GetService(state->pAudioClient,
                                  &IID_IAudioRenderClient,
                                  (void **)&state->pRenderClient);
     EXIT_ON_ERROR(hr);
+    MP_VERBOSE(state, "IAudioClient::Initialize pAudioVolume\n");
     hr = IAudioClient_GetService(state->pAudioClient,
                                  &IID_ISimpleAudioVolume,
                                  (void **) &state->pAudioVolume);
@@ -500,8 +519,10 @@ reinit:
 
     if (!state->hFeed)
         goto exit_label;
+    MP_VERBOSE(state, "IAudioClient::Initialize IAudioClient_SetEventHandle\n");
     hr = IAudioClient_SetEventHandle(state->pAudioClient, state->hFeed);
     EXIT_ON_ERROR(hr);
+    MP_VERBOSE(state, "IAudioClient::Initialize IAudioClient_GetBufferSize\n");
     hr = IAudioClient_GetBufferSize(state->pAudioClient,
                                     &state->bufferFrameCount);
     EXIT_ON_ERROR(hr);
@@ -516,7 +537,7 @@ reinit:
 
     state->hTask =
         state->VistaBlob.pAvSetMmThreadCharacteristicsW(L"Pro Audio", &state->taskIndex);
-    MP_VERBOSE(state, "fix_format OK, using %lld byte buffer block size!\n",
+    MP_VERBOSE(state, "fix_format OK, using %"PRId64" byte buffer block size!\n",
                (long long) state->buffer_block_size);
     return 0;
 exit_label:
@@ -826,6 +847,7 @@ exit_label:
     SAFE_RELEASE(pTempDevice, IMMDevice_Release(pTempDevice));
     SAFE_RELEASE(pDevices, IMMDeviceCollection_Release(pDevices));
     SAFE_RELEASE(pEnumerator, IMMDeviceEnumerator_Release(pEnumerator));
+    CoTaskMemFree(deviceID);
     return hr;
 }
 
@@ -885,7 +907,14 @@ void wasapi_release_proxies(wasapi_state *state, int co_init) {
     if(co_init) CoUninitialize();
 }
 
-static HRESULT create_proxies(struct wasapi_state *state) {
+void reset_proxies(wasapi_state *state) {
+  SAFE_RELEASE(state->sAudioClient, IUnknown_Release(state->sAudioClient));
+  SAFE_RELEASE(state->sAudioVolume, IUnknown_Release(state->sAudioVolume));
+  SAFE_RELEASE(state->sEndpointVolume, IUnknown_Release(state->sEndpointVolume));
+  SAFE_RELEASE(state->sSessionControl, IUnknown_Release(state->sSessionControl));
+}
+
+HRESULT create_proxies(wasapi_state *state) {
     HRESULT hr;
 
 #define MARSHAL(type, to, from) do {                               \
@@ -906,43 +935,54 @@ exit_label:
     return hr;
 }
 
+static HRESULT wasapi_reset_device(struct ao *ao){
+  HRESULT hr;
+  struct wasapi_state *state = (struct wasapi_state *)ao->priv;
+  char *device = state->opt_device;
+  if (!device || !device[0])
+      device = ao->device;
+  if (!device || !device[0]) {
+      hr = IMMDeviceEnumerator_GetDefaultAudioEndpoint(state->pEnumerator,
+                                                       eRender, eConsole,
+                                                       &state->pDevice);
+      char *id = get_device_id(state->pDevice);
+      MP_VERBOSE(ao, "default device ID: %s\n", id);
+      talloc_free(id);
+  } else {
+      hr = find_and_load_device(ao, &state->pDevice, device);
+  }
+  EXIT_ON_ERROR(hr);
+
+  char *name = get_device_name(state->pDevice);
+  MP_VERBOSE(ao, "device loaded: %s\n", name);
+  talloc_free(name);
+  return hr;
+exit_label:
+  MP_ERR(state, "wasapi_reset_device fails with %"PRIx32": %s!\n", (uint32_t)hr, wasapi_explain_err(hr));
+  return hr;
+}
+
 int wasapi_thread_init(struct ao *ao, int simple)
 {
     struct wasapi_state *state = (struct wasapi_state *)ao->priv;
     HRESULT hr;
-    if(!simple) CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
-
-    char *device = state->opt_device;
-    if (!device || !device[0])
-        device = ao->device;
-
-    if (!device || !device[0]) {
-        IMMDeviceEnumerator *pEnumerator;
-        hr = CoCreateInstance(&CLSID_MMDeviceEnumerator, NULL, CLSCTX_ALL,
-                              &IID_IMMDeviceEnumerator, (void**)&pEnumerator);
-        EXIT_ON_ERROR(hr);
-
-        hr = IMMDeviceEnumerator_GetDefaultAudioEndpoint(pEnumerator,
-                                                         eRender, eConsole,
-                                                         &state->pDevice);
-        SAFE_RELEASE(pEnumerator, IMMDeviceEnumerator_Release(pEnumerator));
-
-        char *id = get_device_id(state->pDevice);
-        MP_VERBOSE(ao, "default device ID: %s\n", id);
-        talloc_free(id);
-    } else {
-        hr = find_and_load_device(ao, &state->pDevice, device);
+    if(!simple) {
+      CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     }
+
+    hr = CoCreateInstance(&CLSID_MMDeviceEnumerator, NULL, CLSCTX_ALL,
+    &IID_IMMDeviceEnumerator, (void**)&state->pEnumerator);
     EXIT_ON_ERROR(hr);
 
-    char *name = get_device_name(state->pDevice);
-    MP_VERBOSE(ao, "device loaded: %s\n", name);
-    talloc_free(name);
+    hr = wasapi_reset_device(ao);
+    EXIT_ON_ERROR(hr);
 
+    MP_VERBOSE(ao, "wasapi_thread_init: activating pAudioClient %p\n", state->pAudioClient);
     hr = IMMDeviceActivator_Activate(state->pDevice, &IID_IAudioClient,
                                      CLSCTX_ALL, NULL, (void **)&state->pAudioClient);
     EXIT_ON_ERROR(hr);
 
+    MP_VERBOSE(ao, "wasapi_thread_init: activating pEndpointVolume\n");
     hr = IMMDeviceActivator_Activate(state->pDevice, &IID_IAudioEndpointVolume,
                                      CLSCTX_ALL, NULL,
                                      (void **)&state->pEndpointVolume);
@@ -950,10 +990,12 @@ int wasapi_thread_init(struct ao *ao, int simple)
     IAudioEndpointVolume_QueryHardwareSupport(state->pEndpointVolume,
                                               &state->vol_hw_support);
 
+    MP_VERBOSE(ao, "wasapi_thread_init: probing formats\n");
     state->init_ret = find_formats(ao); /* Probe support formats */
     if (state->init_ret)
         goto exit_label;
-    if (!fix_format(state)) { /* now that we're sure what format to use */
+    MP_VERBOSE(ao, "wasapi_thread_init: fixing formats\n");
+    if (!fix_format(ao, simple)) { /* now that we're sure what format to use */
         EXIT_ON_ERROR(create_proxies(state));
 
         if (state->opt_exclusive)
@@ -970,12 +1012,13 @@ int wasapi_thread_init(struct ao *ao, int simple)
         return state->init_ret;
     }
 exit_label:
+   MP_ERR(state, "wasapi_thread_init fails with %"PRIx32": %s!\n", (uint32_t)hr, wasapi_explain_err(hr));
     state->init_ret = -1;
     if(!simple) SetEvent(state->init_done);
     return -1;
 }
 
-void wasapi_thread_uninit(wasapi_state *state)
+void wasapi_thread_uninit(wasapi_state *state, int simple)
 {
     if (state->pAudioClient)
         IAudioClient_Stop(state->pAudioClient);
@@ -991,9 +1034,12 @@ void wasapi_thread_uninit(wasapi_state *state)
     SAFE_RELEASE(state->pSessionControl, IAudioSessionControl_Release(state->pSessionControl));
     SAFE_RELEASE(state->pAudioClient,    IAudioClient_Release(state->pAudioClient));
     SAFE_RELEASE(state->pDevice,         IMMDevice_Release(state->pDevice));
+    SAFE_RELEASE(state->pEnumerator,     IMMDeviceEnumerator_Release(state->pEnumerator));
 
     if (state->hTask)
         state->VistaBlob.pAvRevertMmThreadCharacteristics(state->hTask);
-    CoUninitialize();
-    ExitThread(0);
+    if(!simple){
+      CoUninitialize();
+      ExitThread(0);
+    }
 }

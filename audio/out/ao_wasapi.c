@@ -40,15 +40,22 @@
               do { if (FAILED(hres)) { goto exit_label; } } while(0)
 #define SAFE_RELEASE(unk, release) \
               do { if ((unk) != NULL) { release; (unk) = NULL; } } while(0)
+static HRESULT reset_interface(struct ao *ao);
 
-static double get_device_delay(struct wasapi_state *state) {
+static double get_device_delay(struct ao *ao) {
+    struct wasapi_state *state = (struct wasapi_state *)ao->priv;
     UINT64 sample_count = atomic_load(&state->sample_count);
     UINT64 position, qpc_position;
     HRESULT hr;
 
+try_again:
     switch (hr = IAudioClock_GetPosition(state->pAudioClock, &position, &qpc_position)) {
         case S_OK: case S_FALSE:
             break;
+        case AUDCLNT_E_DEVICE_INVALIDATED:
+            MP_VERBOSE(ao, "IAudioClock::GetPosition: AUDCLNT_E_DEVICE_INVALIDATED!\n");
+            reset_interface(ao);
+            goto try_again;
         default:
             MP_ERR(state, "IAudioClock::GetPosition returned %s\n", wasapi_explain_err(hr));
     }
@@ -70,14 +77,32 @@ static double get_device_delay(struct wasapi_state *state) {
     return delay;
 }
 
+/* this resets the interface, not to be confused with ao_driver .reset */
 static HRESULT reset_interface(struct ao *ao){
    HRESULT ret;
    struct wasapi_state *state = (struct wasapi_state *)ao->priv;
-   MP_ERR(state, "resetting state after AUDCLNT_E_DEVICE_INVALIDATED\n");
+   MP_VERBOSE(ao, "resetting state after device change\n");
+   IMMDeviceEnumerator_UnregisterEndpointNotificationCallback(
+     state->pEnumerator,
+     (IMMNotificationClient *)&state->changeNotify);
+
    wasapi_release_proxies(state, 0);
+   reset_proxies(state);
+   MP_VERBOSE(ao, "reset_interface: released proxies\n");
+   wasapi_thread_uninit(state,1);
+   MP_VERBOSE(ao, "reset_interface: thread reset\n");
    wasapi_thread_init(ao, 1);
+   MP_VERBOSE(ao, "reset_interface: thread reinited\n");
+   ret = create_proxies(state);
+   MP_VERBOSE(ao, "reset_interface: proxies recreated %"PRIx32": %s!\n", (uint32_t)ret, wasapi_explain_err(ret));
    ret = wasapi_setup_proxies(state, 0);
-   MP_ERR(state, "state reset: %"PRIx32": %s!\n", (uint32_t)ret, wasapi_explain_err(ret));
+   if(ret == S_OK) { ret = wasapi_change_reset(&state->changeNotify, state->pDevice); }
+   MP_VERBOSE(ao, "state reset: %"PRIx32": %s!\n", (uint32_t)ret, wasapi_explain_err(ret));
+   if(ret == S_OK) { ret = IAudioClient_Start(state->pAudioClient); }
+   MP_VERBOSE(ao, "state reset: restarting AudioClient %"PRIx32": %s!\n", (uint32_t)ret, wasapi_explain_err(ret));
+   IMMDeviceEnumerator_RegisterEndpointNotificationCallback(
+     state->pEnumerator,
+     (IMMNotificationClient *)&state->changeNotify);
    return ret;
 }
 
@@ -102,6 +127,7 @@ try_getbuffer:
                                       frame_count, &pData);
 
     if (hr == AUDCLNT_E_DEVICE_INVALIDATED) {
+      MP_VERBOSE(ao, "thread_feed: attempting to reset after AUDCLNT_E_DEVICE_INVALIDATED\n");
       if((hr = reset_interface(ao)) == S_OK) goto try_getbuffer;
     }
 
@@ -109,13 +135,14 @@ try_getbuffer:
 
     BYTE *data[1] = {pData};
     ao_read_data(ao, (void**)data, frame_count, (int64_t) (
-                 mp_time_us() + get_device_delay(state) * 1e6 +
+                 mp_time_us() + get_device_delay(ao) * 1e6 +
                  frame_count * 1e6 / state->format.Format.nSamplesPerSec));
 
     hr = IAudioRenderClient_ReleaseBuffer(state->pRenderClient,
                                           frame_count, 0);
     if (hr == AUDCLNT_E_DEVICE_INVALIDATED) {
       /* Some buffer loss to the warp? */
+      MP_VERBOSE(ao, "thread_feed: attempting to reset after AUDCLNT_E_DEVICE_INVALIDATED\n");
       if((hr = reset_interface(ao)) == S_OK) goto try_getbuffer;
     }
 
@@ -138,17 +165,38 @@ static DWORD __stdcall ThreadLoop(void *lpParameter)
     if (wasapi_thread_init(ao, 0))
         goto exit_label;
 
+    MP_VERBOSE(ao, "Setting up device monitoring on playback device!\n");
+    HRESULT monitor = wasapi_change_init(&state->changeNotify,state->pDevice);
+    MP_VERBOSE(ao, "Monitoring device: %S - %s!\n", state->changeNotify.monitored, wasapi_explain_err(monitor));
+    if (monitor == S_OK) {
+      IMMDeviceEnumerator_RegisterEndpointNotificationCallback(
+        state->pEnumerator,
+       (IMMNotificationClient *)&state->changeNotify);
+    }
+
     MSG msg;
     DWORD waitstatus = WAIT_FAILED;
-    HANDLE playcontrol[] =
-        {state->hUninit, state->hFeed, state->hForceFeed, NULL};
+    HANDLE playcontrol[] = {
+      state->hUninit,
+      state->hFeed,
+      state->hForceFeed,
+      state->changeNotify.OnDeviceRemoved,
+      state->changeNotify.OnDeviceStateChanged,
+      state->changeNotify.OnPropertyValueChanged,
+      NULL};
     MP_VERBOSE(ao, "Entering dispatch loop!\n");
     while (1) { /* watch events */
-        waitstatus = MsgWaitForMultipleObjects(3, playcontrol, FALSE, INFINITE,
-                                               QS_POSTMESSAGE | QS_SENDMESSAGE);
+        waitstatus = MsgWaitForMultipleObjects(
+          sizeof(playcontrol)/sizeof(HANDLE) - 1,
+          playcontrol, FALSE, INFINITE,
+          QS_POSTMESSAGE | QS_SENDMESSAGE);
         switch (waitstatus) {
         case WAIT_OBJECT_0: /*shutdown*/
-            wasapi_thread_uninit(state);
+            IMMDeviceEnumerator_UnregisterEndpointNotificationCallback(
+              state->pEnumerator,
+              (IMMNotificationClient *)&state->changeNotify);
+            wasapi_change_free(&state->changeNotify);
+            wasapi_thread_uninit(state,0);
             goto exit_label;
         case (WAIT_OBJECT_0 + 1): /* feed */
             thread_feed(ao);
@@ -157,12 +205,26 @@ static DWORD __stdcall ThreadLoop(void *lpParameter)
             thread_feed(ao);
             SetEvent(state->hFeedDone);
             break;
-        case (WAIT_OBJECT_0 + 3): /* messages to dispatch (COM marshalling) */
+        case (WAIT_OBJECT_0 + 3): /* force reset */
+            MP_VERBOSE(ao, "OnDeviceRemoved Triggered!\n");
+            reset_interface(ao);
+            break;
+        case (WAIT_OBJECT_0 + 4):
+            MP_VERBOSE(ao, "OnDeviceStateChanged Triggered!\n");
+            reset_interface(ao);
+            break;
+        case (WAIT_OBJECT_0 + 5):
+            MP_VERBOSE(ao, "OnPropertyValueChanged Triggered!\n");
+            reset_interface(ao);
+            break;
+        case (WAIT_OBJECT_0 + 6): /* messages to dispatch (COM marshalling) */
             while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
                 DispatchMessage(&msg);
             }
             break;
+        default:
         case WAIT_FAILED: /* ??? */
+            MP_ERR(ao, "unhandled case in thread loop!");
             return -1;
         }
     }
@@ -211,6 +273,18 @@ static int init(struct ao *ao)
     struct wasapi_state *state = (struct wasapi_state *)ao->priv;
     state->log = ao->log;
     wasapi_fill_VistaBlob(state);
+
+    state->pDevice = NULL;
+    state->pAudioClient = NULL;
+    state->pRenderClient = NULL;
+    state->pAudioVolume = NULL;
+    state->pEndpointVolume = NULL;
+    state->pSessionControl = NULL;
+    state->pEnumerator = NULL;
+    state->pAudioClientProxy = NULL;
+    state->pAudioVolumeProxy = NULL;
+    state->pEndpointVolumeProxy = NULL;
+    state->pSessionControlProxy = NULL;
 
     if (state->opt_list) {
         wasapi_enumerate_devices(state->log, NULL, NULL);

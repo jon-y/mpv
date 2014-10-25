@@ -70,6 +70,17 @@ static double get_device_delay(struct wasapi_state *state) {
     return delay;
 }
 
+static HRESULT reset_interface(struct ao *ao){
+   HRESULT ret;
+   struct wasapi_state *state = (struct wasapi_state *)ao->priv;
+   MP_ERR(state, "resetting state after AUDCLNT_E_DEVICE_INVALIDATED\n");
+   wasapi_release_proxies(state, 0);
+   wasapi_thread_init(ao, 1);
+   ret = wasapi_setup_proxies(state, 0);
+   MP_ERR(state, "state reset: %"PRIx32": %s!\n", (uint32_t)ret, wasapi_explain_err(ret));
+   return ret;
+}
+
 static void thread_feed(struct ao *ao)
 {
     struct wasapi_state *state = (struct wasapi_state *)ao->priv;
@@ -86,8 +97,14 @@ static void thread_feed(struct ao *ao)
     }
 
     BYTE *pData;
+try_getbuffer:
     hr = IAudioRenderClient_GetBuffer(state->pRenderClient,
                                       frame_count, &pData);
+
+    if (hr == AUDCLNT_E_DEVICE_INVALIDATED) {
+      if((hr = reset_interface(ao)) == S_OK) goto try_getbuffer;
+    }
+
     EXIT_ON_ERROR(hr);
 
     BYTE *data[1] = {pData};
@@ -97,13 +114,18 @@ static void thread_feed(struct ao *ao)
 
     hr = IAudioRenderClient_ReleaseBuffer(state->pRenderClient,
                                           frame_count, 0);
+    if (hr == AUDCLNT_E_DEVICE_INVALIDATED) {
+      /* Some buffer loss to the warp? */
+      if((hr = reset_interface(ao)) == S_OK) goto try_getbuffer;
+    }
+
     EXIT_ON_ERROR(hr);
 
     atomic_fetch_add(&state->sample_count, frame_count);
 
     return;
 exit_label:
-    MP_ERR(state, "thread_feed fails with %"PRIx32"!\n", (uint32_t)hr);
+    MP_ERR(state, "thread_feed fails with %"PRIx32": %s!\n", (uint32_t)hr, wasapi_explain_err(hr));
     return;
 }
 
@@ -113,7 +135,7 @@ static DWORD __stdcall ThreadLoop(void *lpParameter)
     if (!ao || !ao->priv)
         return -1;
     struct wasapi_state *state = (struct wasapi_state *)ao->priv;
-    if (wasapi_thread_init(ao))
+    if (wasapi_thread_init(ao, 0))
         goto exit_label;
 
     MSG msg;
@@ -167,7 +189,7 @@ static void uninit(struct ao *ao)
 {
     MP_VERBOSE(ao, "uninit!\n");
     struct wasapi_state *state = (struct wasapi_state *)ao->priv;
-    wasapi_release_proxies(state);
+    wasapi_release_proxies(state,1);
     SetEvent(state->hUninit);
     /* wait up to 10 seconds */
     if (WaitForSingleObject(state->threadLoop, 10000) == WAIT_TIMEOUT)
@@ -227,7 +249,7 @@ static int init(struct ao *ao)
     } else
         MP_VERBOSE(ao, "Init Done!\n");
 
-    wasapi_setup_proxies(state);
+    wasapi_setup_proxies(state,1);
     return state->init_ret;
 }
 

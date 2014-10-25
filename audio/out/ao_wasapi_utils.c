@@ -850,10 +850,10 @@ int wasapi_validate_device(struct mp_log *log, const m_option_t *opt,
     return ret;
 }
 
-HRESULT wasapi_setup_proxies(struct wasapi_state *state) {
+HRESULT wasapi_setup_proxies(struct wasapi_state *state, int co_init) {
     HRESULT hr;
 
-    CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    if(co_init) CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
 
 #define UNMARSHAL(type, to, from) do {                                    \
     hr = CoGetInterfaceAndReleaseStream((from), &(type), (void**) &(to)); \
@@ -876,13 +876,13 @@ exit_label:
     return hr;
 }
 
-void wasapi_release_proxies(wasapi_state *state) {
+void wasapi_release_proxies(wasapi_state *state, int co_init) {
     SAFE_RELEASE(state->pAudioClientProxy,    IUnknown_Release(state->pAudioClientProxy));
     SAFE_RELEASE(state->pAudioVolumeProxy,    IUnknown_Release(state->pAudioVolumeProxy));
     SAFE_RELEASE(state->pEndpointVolumeProxy, IUnknown_Release(state->pEndpointVolumeProxy));
     SAFE_RELEASE(state->pSessionControlProxy, IUnknown_Release(state->pSessionControlProxy));
 
-    CoUninitialize();
+    if(co_init) CoUninitialize();
 }
 
 static HRESULT create_proxies(struct wasapi_state *state) {
@@ -906,11 +906,11 @@ exit_label:
     return hr;
 }
 
-int wasapi_thread_init(struct ao *ao)
+int wasapi_thread_init(struct ao *ao, int simple)
 {
     struct wasapi_state *state = (struct wasapi_state *)ao->priv;
     HRESULT hr;
-    CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    if(!simple) CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
 
     char *device = state->opt_device;
     if (!device || !device[0])
@@ -966,12 +966,12 @@ int wasapi_thread_init(struct ao *ao)
         state->previous_volume = state->initial_volume;
 
         MP_VERBOSE(ao, "thread_init OK!\n");
-        SetEvent(state->init_done);
+        if(!simple) SetEvent(state->init_done);
         return state->init_ret;
     }
 exit_label:
     state->init_ret = -1;
-    SetEvent(state->init_done);
+    if(!simple) SetEvent(state->init_done);
     return -1;
 }
 

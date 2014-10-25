@@ -123,7 +123,7 @@ static HRESULT STDMETHODCALLTYPE sIMMNotificationClient_OnPropertyValueChanged(
   return S_OK;
 }
 
-CONST_VTBL IMMNotificationClientVtbl sIMMDeviceEnumeratorVtbl_vtbl = {
+static CONST_VTBL IMMNotificationClientVtbl sIMMDeviceEnumeratorVtbl_vtbl = {
   .QueryInterface = sIMMNotificationClient_QueryInterface,
   .AddRef = sIMMNotificationClient_AddRef,
   .Release = sIMMNotificationClient_Release,

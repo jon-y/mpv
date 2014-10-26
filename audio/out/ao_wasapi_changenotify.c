@@ -31,14 +31,13 @@
 #include "ao_wasapi_utils.h"
 
 static int GUID_compare (const GUID *l, const GUID *r){
-
+  unsigned int i;
   if(l->Data1 != r->Data1) return 1;
   if(l->Data2 != r->Data2) return 1;
   if(l->Data3 != r->Data3) return 1;
-  if(l->Data4[0] != r->Data4[0]) return 1;
-  if(l->Data4[1] != r->Data4[1]) return 1;
-  if(l->Data4[2] != r->Data4[2]) return 1;
-  if(l->Data4[3] != r->Data4[3]) return 1;
+  for (i = 0; i < 8; i++) {
+    if(l->Data4[0] != r->Data4[0]) return 1;
+  }
   return 0;
 }
 

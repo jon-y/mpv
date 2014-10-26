@@ -39,6 +39,7 @@ typedef struct change_notify {
   HANDLE OnPropertyValueChanged;
   LPWSTR monitored; /* Monitored device */
   LPWSTR newDevice; /* whatever last plugged in new device */
+  PROPERTYKEY propChanged; /* what prop changed ?*/
   ULONG count;
 } change_notify;
 

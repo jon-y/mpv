@@ -215,6 +215,16 @@ static DWORD __stdcall ThreadLoop(void *lpParameter)
             break;
         case (WAIT_OBJECT_0 + 5):
             MP_VERBOSE(ao, "OnPropertyValueChanged Triggered!\n");
+            MP_VERBOSE(ao, "  -->Changed device property "
+               "{%8.8lx-%4.4x-%4.4x-%2.2x%2.2x-%2.2x%2.2x%2.2x%2.2x%2.2x%2.2x}#%lu\n",
+               state->changeNotify.propChanged.fmtid.Data1,
+               state->changeNotify.propChanged.fmtid.Data2,
+               state->changeNotify.propChanged.fmtid.Data3,
+               state->changeNotify.propChanged.fmtid.Data4[0], state->changeNotify.propChanged.fmtid.Data4[1],
+               state->changeNotify.propChanged.fmtid.Data4[2], state->changeNotify.propChanged.fmtid.Data4[3],
+               state->changeNotify.propChanged.fmtid.Data4[4], state->changeNotify.propChanged.fmtid.Data4[5],
+               state->changeNotify.propChanged.fmtid.Data4[6], state->changeNotify.propChanged.fmtid.Data4[7],
+               state->changeNotify.propChanged.pid);
             reset_interface(ao);
             break;
         case (WAIT_OBJECT_0 + 6): /* messages to dispatch (COM marshalling) */

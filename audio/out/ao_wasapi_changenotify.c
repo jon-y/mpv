@@ -30,13 +30,25 @@
 #include "ao_wasapi.h"
 #include "ao_wasapi_utils.h"
 
+static int GUID_compare (const GUID *l, const GUID *r){
+
+  if(l->Data1 != r->Data1) return 1;
+  if(l->Data2 != r->Data2) return 1;
+  if(l->Data3 != r->Data3) return 1;
+  if(l->Data4[0] != r->Data4[0]) return 1;
+  if(l->Data4[1] != r->Data4[1]) return 1;
+  if(l->Data4[2] != r->Data4[2]) return 1;
+  if(l->Data4[3] != r->Data4[3]) return 1;
+  return 0;
+}
+
 static HRESULT STDMETHODCALLTYPE sIMMNotificationClient_QueryInterface
 (IMMNotificationClient* This,
    REFIID riid,
    void **ppvObject){
   /* Compatible with IMMNotificationClient and IUnknown */
-  if(!memcmp(&IID_IMMNotificationClient, riid, sizeof(GUID)) ||
-     !memcmp(&IID_IUnknown, riid, sizeof(GUID))) {
+  if(!GUID_compare(&IID_IMMNotificationClient, riid) ||
+     !GUID_compare(&IID_IUnknown, riid)) {
     *ppvObject = (IMMNotificationClient *) This;
     return S_OK;
   } else {

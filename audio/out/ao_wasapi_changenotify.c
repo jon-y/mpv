@@ -129,6 +129,7 @@ static HRESULT STDMETHODCALLTYPE sIMMNotificationClient_OnPropertyValueChanged(
         const PROPERTYKEY key){
   change_notify *_this = (change_notify *) This;
   if(!wcscmp(_this->monitored, pwstrDeviceId)){
+    _this->propChanged = key;
     SetEvent(_this->OnPropertyValueChanged);
   } /* do we care about other devices? */
   return S_OK;

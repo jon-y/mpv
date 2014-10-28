@@ -456,6 +456,9 @@ exit_label:
     return 1;
 }
 
+/* random identifying info */
+static const GUID mpvGUID = { 0x77b166f0, 0x6bd6, 0x482f, { 0x8b, 0x7e, 0x2d, 0x59, 0xaa, 0x34, 0xca, 0xf2}};
+
 static int fix_format(struct ao *const ao, int simple)
 {
     HRESULT hr;
@@ -477,7 +480,7 @@ reinit:
                                  state->defaultRequestedDuration,
                                  state->defaultRequestedDuration,
                                  &(state->format.Format),
-                                 NULL);
+                                 &mpvGUID);
     /* something about buffer sizes on Win7, fixme might loop forever */
     switch (hr) {
       case  AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED:

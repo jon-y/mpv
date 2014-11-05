@@ -36,7 +36,7 @@ static int GUID_compare (const GUID *l, const GUID *r){
   if(l->Data2 != r->Data2) return 1;
   if(l->Data3 != r->Data3) return 1;
   for (i = 0; i < 8; i++) {
-    if(l->Data4[0] != r->Data4[0]) return 1;
+    if(l->Data4[i] != r->Data4[i]) return 1;
   }
   return 0;
 }
